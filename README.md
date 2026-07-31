@@ -18,31 +18,26 @@ A movie is **successful** when revenue > budget.
 | `requirements.txt` | Libraries needed to run and deploy. |
 | `ANSWERS.md` | Written answers to the project brief, grounded in this data. |
 
-## Six pages (sidebar navigation)
+## Seven pages (sidebar navigation)
 
-1. **Overview** — KPIs, a budget/revenue **density heatmap**, a genre→outcome
-   **sunburst**, and a revenue **treemap**.
-2. **Genre Explorer** — a **radar chart** profiling any genre against all films.
-3. **Insights** — correlation heatmap, a **parallel-coordinates** plot, a
-   **violin** t-test view, and a chi-square test.
-4. **Model Lab** — compares Random Forest, Gradient Boosting and Logistic
+1. **Problem Statement** — what "success" means, why it matters, and what the app does.
+2. **Overview** — KPIs, a budget/revenue density view, a genre hit/flop sunburst,
+   and a revenue treemap.
+3. **Genre Explorer** — a radar chart profiling any genre against the typical film.
+4. **Statistics** — correlation, an "average hit vs average flop" comparison, a
+   t-test (with a violin plot), and a chi-square test.
+5. **Model Lab** — compares Random Forest, Gradient Boosting and Logistic
    Regression; shows the confusion matrix, feature importance, and revenue-model R².
-5. **Predictor** — probability gauge + revenue/ROI estimate + a **"similar films"**
-   table (real nearest neighbours from the data) + a **budget sensitivity** sweep
-   + a downloadable report.
-6. **Global** — a reference **map** of major world film-production hubs.
+6. **Predictor** — probability gauge + revenue/ROI estimate + a "real films most
+   like yours" table + a budget sensitivity chart + a downloadable report.
+7. **Insights & Recommendations** — plain-language findings (computed live from the
+   data) and business recommendations.
 
-## Uncommon charts used
+## Charts used
 
-Density heatmap, sunburst, treemap, radar (polar), parallel coordinates, violin,
-gauge, and a geographic scatter map — chosen to stand apart from the usual
-bar/scatter-only projects.
-
-## A note on the map
-
-`movies.csv` has no country/location column, so the map is **industry context**
-(real production hubs), not derived from the dataset. This is stated in the app
-itself so it's transparent to any reviewer.
+Density heatmap, sunburst, treemap, radar (polar), grouped comparison bars,
+violin, gauge, and a dual-axis sensitivity line — every caption is written in
+plain language so a non-technical reader can follow it.
 
 ## Run locally
 
