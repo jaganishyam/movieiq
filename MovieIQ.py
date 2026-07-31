@@ -254,9 +254,10 @@ with tab_eda:
         )
         fig, ax = plt.subplots(figsize=(8, 4))
         sns.boxplot(
-            data=fdf, x="success", y=feat, ax=ax,
+            data=fdf, x="success", y=feat, hue="success", legend=False, ax=ax,
             palette={0: "#d62728", 1: "#2ca02c"},
         )
+        ax.set_xticks([0, 1])
         ax.set_xticklabels(["Failure (0)", "Success (1)"])
         ax.set_title(f"{feat} vs success")
         st.pyplot(fig)
