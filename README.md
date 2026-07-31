@@ -45,14 +45,5 @@ plain language so a non-technical reader can follow it.
 pip install -r requirements.txt
 streamlit run MovieIQ.py
 ```
-
-## Deploy on Streamlit Community Cloud (free)
-
-1. Push these files to a **public GitHub repo** — including the **`.streamlit`
-   folder** and **`movies.csv`**.
-2. Go to <https://share.streamlit.io>, sign in with GitHub.
-3. Click **Create app**, set Repository, Branch `main`, Main file `MovieIQ.py`.
-4. **Deploy.**
-
 To add the theme folder on GitHub's website: **Add file → Create new file**, type
 `.streamlit/config.toml` as the name, paste the contents.
