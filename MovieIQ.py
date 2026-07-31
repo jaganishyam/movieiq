@@ -1,87 +1,126 @@
 """
-MovieIQ - Predictive Analytics on Film Success
-================================================
-A Streamlit dashboard that explores a movie dataset, runs statistical tests,
-trains a Random Forest model, and predicts whether a film will be successful.
+MovieIQ — Film Intelligence Platform
+====================================
+An interactive analytics platform that studies a movie dataset and predicts a
+film's commercial outcome with a DUAL engine:
 
-A movie is "successful" when its revenue is greater than its budget.
+    1. Success probability  -> will revenue beat budget? (classification)
+    2. Revenue & ROI estimate -> roughly how much will it earn? (regression)
 
-HOW TO RUN (this is what "pure python file" means):
-    Streamlit runs a plain .py script, NOT a Jupyter notebook.
-    From a terminal, in this folder, type:
-        streamlit run MovieIQ.py
+A movie is "successful" when revenue > budget.
 
-Maps to the project brief stages:
-    Stage 1 -> load_data()            (data prep + cleaning)
-    Stage 2 -> "EDA" tab              (exploratory charts)
-    Stage 3 -> "Statistical Tests" tab (t-test + chi-square)
-    Stage 4 -> train_model()          (Random Forest + evaluation)
-    Stage 5 -> the whole app          (interactive Streamlit dashboard)
+Run it (Streamlit needs a plain .py file, not a notebook):
+    streamlit run MovieIQ.py
+
+Structure (sidebar navigation acts like pages of a platform):
+    Overview        - market KPIs and the budget/revenue landscape
+    Genre Explorer  - deep-dive into a single genre
+    Insights        - EDA + statistical tests, told as a story
+    Model Lab       - train & compare three models, inspect importance
+    Predictor       - the dual engine: probability gauge + revenue/ROI + why
 """
 
 import ast
+import io
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from scipy import stats
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (accuracy_score, confusion_matrix,
-                             precision_score, recall_score)
+from sklearn.ensemble import (GradientBoostingClassifier,
+                              RandomForestClassifier, RandomForestRegressor)
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (accuracy_score, confusion_matrix, f1_score,
+                             mean_absolute_error, precision_score, r2_score,
+                             recall_score)
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 # ----------------------------------------------------------------------
-# Page setup
+# Brand palette & page config
 # ----------------------------------------------------------------------
-st.set_page_config(page_title="MovieIQ", page_icon="🎬", layout="wide")
+GOLD = "#E8B923"
+GREEN = "#2FBF71"
+RED = "#E4572E"
+BLUE = "#4C9BE8"
+INK = "#0B0E1A"
+CARD = "#151A2E"
+MUTED = "#8A93A6"
 
-sns.set_theme(style="whitegrid")
-
-# The numeric columns we analyse and model on.
 NUMERIC_COLS = ["budget", "revenue", "popularity", "runtime", "vote_average"]
+# Features fed to the models. We EXCLUDE `revenue` (it defines the success
+# target -> data leakage) and `title` (a unique label, not a predictor).
+FEATURES = ["budget", "popularity", "runtime", "vote_average"]
 
-# Features we FEED the model. Note two deliberate exclusions:
-#   - "revenue" is excluded because success is DEFINED as revenue > budget.
-#     Including it would let the model "cheat" (this is called data leakage).
-#   - "title" is excluded because it is a unique label, not a predictor.
-MODEL_NUMERIC_FEATURES = ["budget", "popularity", "runtime", "vote_average"]
+st.set_page_config(page_title="MovieIQ — Film Intelligence",
+                   page_icon="🎬", layout="wide",
+                   initial_sidebar_state="expanded")
+
+# ----------------------------------------------------------------------
+# Custom styling (this is what makes it not look like a default app)
+# ----------------------------------------------------------------------
+st.markdown(f"""
+<style>
+    .stApp {{ background: radial-gradient(1200px 600px at 20% -10%,
+              #1a2140 0%, {INK} 55%); }}
+    #MainMenu, footer {{ visibility: hidden; }}
+    .hero {{
+        padding: 26px 30px; border-radius: 18px; margin-bottom: 8px;
+        background: linear-gradient(120deg, #1c2444 0%, #10152a 100%);
+        border: 1px solid rgba(232,185,35,0.25);
+    }}
+    .hero h1 {{ margin: 0; font-size: 2.15rem; letter-spacing: .5px;
+        color: #fff; }}
+    .hero h1 span {{ color: {GOLD}; }}
+    .hero p {{ margin: 6px 0 0; color: {MUTED}; font-size: 1.02rem; }}
+    .kpi {{
+        background: {CARD}; border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 14px; padding: 16px 18px; height: 100%;
+    }}
+    .kpi .label {{ color: {MUTED}; font-size: .78rem; text-transform: uppercase;
+        letter-spacing: 1px; }}
+    .kpi .value {{ color: #fff; font-size: 1.7rem; font-weight: 700;
+        margin-top: 4px; }}
+    .kpi .value.gold {{ color: {GOLD}; }}
+    .verdict {{
+        border-radius: 16px; padding: 20px 24px; margin-top: 10px;
+        font-size: 1.1rem; border: 1px solid rgba(255,255,255,0.08);
+    }}
+    .pill {{ display:inline-block; padding: 3px 12px; border-radius: 999px;
+        font-size: .8rem; font-weight: 600; }}
+    section[data-testid="stSidebar"] {{ background: #0c1122; }}
+    .stTabs [data-baseweb="tab-list"] {{ gap: 4px; }}
+</style>
+""", unsafe_allow_html=True)
+
+PLOTLY_LAYOUT = dict(
+    template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#EAECF2"),
+    margin=dict(l=10, r=10, t=50, b=10),
+)
 
 
 # ----------------------------------------------------------------------
-# STAGE 1 - Data preparation
+# Data layer  (Stage 1)
 # ----------------------------------------------------------------------
 @st.cache_data
 def load_data(path: str = "movies.csv") -> pd.DataFrame:
-    """
-    Load and clean the dataset.
-
-    @st.cache_data means Streamlit runs this once and reuses the result,
-    so the file is not re-read on every click (keeps the app fast).
-    """
     df = pd.read_csv(path)
-
-    # 2. Handle zeros/missing in budget & revenue.
-    #    A budget or revenue of 0 is almost always missing/unknown data, not a
-    #    real value. If revenue were 0, revenue > budget would wrongly say the
-    #    film failed. So we drop those rows to keep the success label honest.
+    # Drop rows with 0/blank budget or revenue: a 0 usually means "unknown",
+    # and a 0 revenue would falsely flag a film as a failure.
     df = df.dropna(subset=NUMERIC_COLS)
     df = df[(df["budget"] > 0) & (df["revenue"] > 0)].copy()
-
-    # 3. Create the target: success = 1 when revenue > budget, else 0.
     df["success"] = (df["revenue"] > df["budget"]).astype(int)
-
-    # 4. The genres column is stored in TMDB's raw format, e.g.
-    #        "[{'id': 18, 'name': 'Drama'}]"
-    #    We parse it into a clean primary-genre string we can filter on.
-    df["genre"] = df["genres"].apply(_extract_primary_genre)
-
+    df["genre"] = df["genres"].apply(_primary_genre)
+    df["roi"] = df["revenue"] / df["budget"]              # return multiple
+    df["profit"] = df["revenue"] - df["budget"]
     return df
 
 
-def _extract_primary_genre(raw: str) -> str:
-    """Turn "[{'id': 18, 'name': 'Drama'}]" into "Drama". Falls back safely."""
+def _primary_genre(raw: str) -> str:
     try:
         parsed = ast.literal_eval(raw)
         if isinstance(parsed, list) and parsed:
@@ -91,331 +130,408 @@ def _extract_primary_genre(raw: str) -> str:
     return "Unknown"
 
 
+def _encode(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.get_dummies(df[FEATURES + ["genre"]], columns=["genre"])
+
+
 # ----------------------------------------------------------------------
-# STAGE 4 - Predictive model (Random Forest)
+# Model layer  (Stage 4) — classification + regression engines
 # ----------------------------------------------------------------------
 @st.cache_resource
-def train_model(df: pd.DataFrame):
-    """
-    Train a Random Forest on the FULL (unfiltered) dataset so predictions
-    stay stable no matter what the user filters in the sidebar.
-
-    @st.cache_resource caches the trained model object itself.
-
-    Returns the model, its feature-column order, and an evaluation dict.
-    """
-    # Build the feature matrix: numeric features + one-hot encoded genre.
-    X = pd.get_dummies(
-        df[MODEL_NUMERIC_FEATURES + ["genre"]], columns=["genre"]
-    )
+def train_engines(df: pd.DataFrame):
+    X = _encode(df)
     y = df["success"]
+    Xtr, Xte, ytr, yte = train_test_split(
+        X, y, test_size=0.20, random_state=42, stratify=y)
 
-    # 2. Train/test split. We hold out 20% the model never sees during
-    #    training, so accuracy is measured on unseen data (an honest test).
-    #    stratify=y keeps the same success/failure ratio in both sets.
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, random_state=42, stratify=y
-    )
-
-    # 3. A Random Forest builds many decision trees on random slices of the
-    #    data and features, then lets them "vote". The majority vote is the
-    #    prediction. Averaging many trees reduces overfitting.
-    model = RandomForestClassifier(n_estimators=200, random_state=42)
-    model.fit(X_train, y_train)
-
-    # 4. Evaluate on the held-out test set.
-    preds = model.predict(X_test)
-    evaluation = {
-        "accuracy": accuracy_score(y_test, preds),
-        "precision": precision_score(y_test, preds, zero_division=0),
-        "recall": recall_score(y_test, preds, zero_division=0),
-        "confusion": confusion_matrix(y_test, preds),
-        "baseline": y_test.mean(),  # accuracy if we always guessed "success"
-        "importance": pd.Series(
-            model.feature_importances_, index=X.columns
-        ).sort_values(ascending=False),
+    candidates = {
+        "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42),
+        "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+        "Logistic Regression": make_pipeline(
+            StandardScaler(), LogisticRegression(max_iter=1000)),
     }
-    return model, list(X.columns), evaluation
+    rows, fitted = [], {}
+    for name, model in candidates.items():
+        model.fit(Xtr, ytr)
+        pred = model.predict(Xte)
+        fitted[name] = model
+        rows.append({
+            "Model": name,
+            "Accuracy": accuracy_score(yte, pred),
+            "Precision": precision_score(yte, pred, zero_division=0),
+            "Recall": recall_score(yte, pred, zero_division=0),
+            "F1": f1_score(yte, pred, zero_division=0),
+        })
+    scores = pd.DataFrame(rows).sort_values("F1", ascending=False).reset_index(drop=True)
+
+    best_name = scores.iloc[0]["Model"]
+    best_clf = fitted[best_name]
+    conf = confusion_matrix(yte, best_clf.predict(Xte))
+
+    # Feature importance (tree models expose it directly).
+    if hasattr(best_clf, "feature_importances_"):
+        importance = pd.Series(best_clf.feature_importances_, index=X.columns)
+    else:  # logistic regression -> use |coefficients|
+        importance = pd.Series(np.abs(best_clf[-1].coef_[0]), index=X.columns)
+    importance = importance.sort_values(ascending=False)
+
+    # Revenue regressor (the engine that actually carries signal here).
+    reg = RandomForestRegressor(n_estimators=200, random_state=42)
+    Xrtr, Xrte, yrtr, yrte = train_test_split(
+        X, df["revenue"], test_size=0.20, random_state=42)
+    reg.fit(Xrtr, yrtr)
+    reg_r2 = r2_score(yrte, reg.predict(Xrte))
+    reg_mae = mean_absolute_error(yrte, reg.predict(Xrte))
+
+    return {
+        "scores": scores, "best_name": best_name, "best_clf": best_clf,
+        "confusion": conf, "baseline": yte.mean(), "importance": importance,
+        "columns": list(X.columns), "reg": reg, "reg_r2": reg_r2, "reg_mae": reg_mae,
+    }
 
 
-def predict_success(model, feature_cols, movie: dict) -> tuple:
-    """Predict success for one movie described by a dict of its details."""
-    row = pd.DataFrame([movie])
-    row = pd.get_dummies(row, columns=["genre"])
-    # Line up columns with training order; genres the movie doesn't have = 0.
-    row = row.reindex(columns=feature_cols, fill_value=0)
-    pred = model.predict(row)[0]
-    proba = model.predict_proba(row)[0][1]  # probability of class "success"
-    return int(pred), float(proba)
+def score_movie(engines, movie: dict) -> dict:
+    row = pd.get_dummies(pd.DataFrame([movie]), columns=["genre"])
+    row = row.reindex(columns=engines["columns"], fill_value=0)
+    clf = engines["best_clf"]
+    prob = float(clf.predict_proba(row)[0][1])
+    est_rev = float(engines["reg"].predict(row)[0])
+    return {"prob": prob, "est_revenue": est_rev,
+            "est_profit": est_rev - movie["budget"],
+            "est_roi": est_rev / movie["budget"]}
+
+
+# ----------------------------------------------------------------------
+# Small UI helpers
+# ----------------------------------------------------------------------
+def kpi(label, value, gold=False):
+    cls = "value gold" if gold else "value"
+    st.markdown(
+        f'<div class="kpi"><div class="label">{label}</div>'
+        f'<div class="{cls}">{value}</div></div>', unsafe_allow_html=True)
+
+
+def money(x):
+    return f"${x/1e6:,.1f}M" if abs(x) < 1e9 else f"${x/1e9:,.2f}B"
 
 
 # ======================================================================
-# APP BODY
+# APP
 # ======================================================================
 df = load_data()
-model, feature_cols, ev = train_model(df)
+engines = train_engines(df)
+genres = sorted(df["genre"].unique())
 
-st.title("🎬 MovieIQ — Predictive Analytics on Film Success")
-st.caption(
-    "A movie is **successful** when its revenue is greater than its budget. "
-    "Explore the data, test it statistically, and predict a film's outcome."
-)
+# ---- Sidebar: navigation + global filters ----
+with st.sidebar:
+    st.markdown(f"<h2 style='color:{GOLD};margin-bottom:0'>🎬 MovieIQ</h2>"
+                f"<p style='color:{MUTED};margin-top:2px'>Film Intelligence Platform</p>",
+                unsafe_allow_html=True)
+    page = st.radio("Navigate", ["Overview", "Genre Explorer", "Insights",
+                                 "Model Lab", "Predictor"], label_visibility="collapsed")
+    st.markdown("---")
+    st.caption("Global filters")
+    f_genres = st.multiselect("Genres", genres, default=genres)
+    f_vote = st.slider("Minimum vote average",
+                       float(df.vote_average.min()), float(df.vote_average.max()),
+                       float(df.vote_average.min()), 0.1)
 
-# ----------------------------------------------------------------------
-# Sidebar filters (Stage 5.1)
-# ----------------------------------------------------------------------
-st.sidebar.header("Filters")
-
-all_genres = sorted(df["genre"].unique())
-chosen_genres = st.sidebar.multiselect(
-    "Genre", options=all_genres, default=all_genres,
-    help="Filter every chart below by one or more genres.",
-)
-min_vote = st.sidebar.slider(
-    "Minimum vote average", float(df["vote_average"].min()),
-    float(df["vote_average"].max()), float(df["vote_average"].min()), 0.1,
-)
-
-# Apply the filters. This filtered view drives the EDA + stats tabs.
-mask = df["genre"].isin(chosen_genres) & (df["vote_average"] >= min_vote)
+mask = df["genre"].isin(f_genres) & (df["vote_average"] >= f_vote)
 fdf = df[mask]
 
-st.sidebar.markdown("---")
-st.sidebar.metric("Movies after filter", f"{len(fdf):,}")
-if len(fdf):
-    st.sidebar.metric("Success rate", f"{fdf['success'].mean():.0%}")
+# ---- Shared hero header ----
+st.markdown(
+    "<div class='hero'><h1>Movie<span>IQ</span> · Film Intelligence</h1>"
+    "<p>Predict a film's commercial outcome from budget, popularity, runtime, "
+    "rating and genre — with a success probability <b>and</b> a revenue estimate.</p></div>",
+    unsafe_allow_html=True)
 
-# Top-line KPIs
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Movies (total)", f"{len(df):,}")
-c2.metric("Overall success rate", f"{df['success'].mean():.0%}")
-c3.metric("Median budget", f"${df['budget'].median()/1e6:.0f}M")
-c4.metric("Median revenue", f"${df['revenue'].median()/1e6:.0f}M")
+if fdf.empty and page in ("Overview", "Genre Explorer", "Insights"):
+    st.warning("No movies match the current filters — widen them in the sidebar.")
+    st.stop()
 
-tab_eda, tab_stats, tab_model, tab_predict = st.tabs(
-    ["📊 EDA", "🧪 Statistical Tests", "🌲 Model", "🔮 Predict"]
-)
 
-# ----------------------------------------------------------------------
-# STAGE 2 - Exploratory Data Analysis
-# ----------------------------------------------------------------------
-with tab_eda:
-    if fdf.empty:
-        st.warning("No movies match the current filters. Widen them in the sidebar.")
-    else:
-        st.subheader("Budget vs. Revenue")
-        col1, col2 = st.columns(2)
-        with col1:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            sns.scatterplot(
-                data=fdf, x="budget", y="revenue", hue="success",
-                palette={0: "#d62728", 1: "#2ca02c"}, alpha=0.6, ax=ax,
-            )
-            # Reference line where revenue == budget (break-even).
-            lims = [0, max(fdf["budget"].max(), fdf["revenue"].max())]
-            ax.plot(lims, lims, "--", color="gray", label="break-even")
-            ax.set_title("Budget vs Revenue (green = success)")
-            ax.legend()
-            st.pyplot(fig)
-            plt.close(fig)
-        with col2:
-            st.markdown(
-                "**Reading it:** points above the dashed break-even line made "
-                "more than they cost (successes). A rising cloud would mean "
-                "bigger budgets earn more — check whether that holds here."
-            )
+# ======================================================================
+# PAGE: OVERVIEW
+# ======================================================================
+if page == "Overview":
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: kpi("Films in view", f"{len(fdf):,}")
+    with c2: kpi("Success rate", f"{fdf.success.mean():.0%}", gold=True)
+    with c3: kpi("Median budget", money(fdf.budget.median()))
+    with c4: kpi("Median revenue", money(fdf.revenue.median()))
 
-        st.subheader("Genre trends")
-        col1, col2 = st.columns(2)
-        with col1:
-            counts = fdf["genre"].value_counts()
-            fig, ax = plt.subplots(figsize=(6, 4))
-            sns.barplot(x=counts.values, y=counts.index, ax=ax, color="#4c72b0")
-            ax.set_title("Most common genres")
-            ax.set_xlabel("Number of movies")
-            st.pyplot(fig)
-            plt.close(fig)
-        with col2:
-            succ_by_genre = (
-                fdf.groupby("genre")["success"].mean().sort_values(ascending=False)
-            )
-            fig, ax = plt.subplots(figsize=(6, 4))
-            sns.barplot(x=succ_by_genre.values, y=succ_by_genre.index,
-                        ax=ax, color="#2ca02c")
-            ax.set_title("Success rate by genre")
-            ax.set_xlabel("Share of movies that succeeded")
-            st.pyplot(fig)
-            plt.close(fig)
+    st.markdown("### The budget–revenue landscape")
+    fig = px.scatter(
+        fdf, x="budget", y="revenue", color="success", size="popularity",
+        color_discrete_map={0: RED, 1: GREEN}, hover_data=["genre", "vote_average"],
+        labels={"success": "Success"}, size_max=18)
+    mx = max(fdf.budget.max(), fdf.revenue.max())
+    fig.add_trace(go.Scatter(x=[0, mx], y=[0, mx], mode="lines",
+                             line=dict(dash="dash", color=MUTED), name="break-even"))
+    fig.update_layout(**PLOTLY_LAYOUT, height=430,
+                      legend=dict(orientation="h", y=1.12))
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Bubbles above the dashed line earned more than they cost. "
+               "Bubble size = popularity. Notice budget alone doesn't decide the outcome.")
 
-        st.subheader("How features relate to success")
-        feat = st.selectbox(
-            "Compare a feature across successful vs failed movies",
-            ["popularity", "runtime", "vote_average", "budget"],
-        )
-        fig, ax = plt.subplots(figsize=(8, 4))
-        sns.boxplot(
-            data=fdf, x="success", y=feat, hue="success", legend=False, ax=ax,
-            palette={0: "#d62728", 1: "#2ca02c"},
-        )
-        ax.set_xticks([0, 1])
-        ax.set_xticklabels(["Failure (0)", "Success (1)"])
-        ax.set_title(f"{feat} vs success")
-        st.pyplot(fig)
-        plt.close(fig)
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("#### Success rate by genre")
+        g = fdf.groupby("genre")["success"].mean().sort_values()
+        fig = px.bar(g, orientation="h", color=g.values,
+                     color_continuous_scale=["#3a2a2a", GREEN])
+        fig.update_layout(**PLOTLY_LAYOUT, height=360, showlegend=False,
+                          coloraxis_showscale=False,
+                          xaxis_title="share succeeding", yaxis_title="")
+        st.plotly_chart(fig, width="stretch")
+    with colB:
+        st.markdown("#### Typical ROI by genre (median return multiple)")
+        r = fdf.groupby("genre")["roi"].median().sort_values()
+        fig = px.bar(r, orientation="h", color=r.values,
+                     color_continuous_scale=["#2a2f3a", GOLD])
+        fig.update_layout(**PLOTLY_LAYOUT, height=360, showlegend=False,
+                          coloraxis_showscale=False,
+                          xaxis_title="revenue ÷ budget", yaxis_title="")
+        st.plotly_chart(fig, width="stretch")
 
-        st.subheader("Correlation heatmap")
-        fig, ax = plt.subplots(figsize=(7, 5))
-        sns.heatmap(
-            fdf[NUMERIC_COLS + ["success"]].corr(),
-            annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax,
-        )
-        ax.set_title("Correlation between numeric features")
-        st.pyplot(fig)
-        plt.close(fig)
-        st.caption(
-            "Strongly correlated feature pairs (near +1 or -1) carry "
-            "overlapping information, which can make a model less stable."
-        )
+    # Download the filtered slice
+    buf = io.StringIO(); fdf.to_csv(buf, index=False)
+    st.download_button("⬇ Download this filtered dataset (CSV)",
+                       buf.getvalue(), "movieiq_filtered.csv", "text/csv")
 
-# ----------------------------------------------------------------------
-# STAGE 3 - Statistical testing
-# ----------------------------------------------------------------------
-with tab_stats:
-    st.subheader("Is the difference real, or just chance?")
-    st.markdown(
-        "A **p-value** is the probability of seeing a difference this large "
-        "if there were truly no difference. We use the common threshold "
-        "**0.05**: below it, we call the result *statistically significant*."
-    )
 
-    if fdf["success"].nunique() < 2:
-        st.warning("Need both successful and failed movies in view to run tests.")
-    else:
-        # --- T-Test: does a numeric feature differ between the two groups? ---
-        st.markdown("### T-Test")
-        num_feat = st.selectbox(
-            "Numeric feature to test", ["popularity", "vote_average", "runtime", "budget"],
-        )
-        group_ok = fdf.groupby("success")[num_feat]
-        t_stat, p_val = stats.ttest_ind(
-            fdf[fdf["success"] == 1][num_feat],
-            fdf[fdf["success"] == 0][num_feat],
-            equal_var=False,
-        )
-        st.write(
-            f"**H₀ (null):** the mean *{num_feat}* is the same for successful "
-            f"and unsuccessful movies."
-        )
-        cc1, cc2 = st.columns(2)
-        cc1.metric("t-statistic", f"{t_stat:.3f}")
-        cc2.metric("p-value", f"{p_val:.4f}")
-        if p_val < 0.05:
-            st.success(
-                f"p < 0.05 → reject H₀. *{num_feat}* differs significantly "
-                "between successful and failed movies."
-            )
+# ======================================================================
+# PAGE: GENRE EXPLORER
+# ======================================================================
+elif page == "Genre Explorer":
+    pick = st.selectbox("Choose a genre to profile", genres)
+    gdf = df[df["genre"] == pick]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: kpi("Films", f"{len(gdf):,}")
+    with c2: kpi("Success rate", f"{gdf.success.mean():.0%}", gold=True)
+    with c3: kpi("Median ROI", f"{gdf.roi.median():.2f}×")
+    with c4: kpi("Avg vote", f"{gdf.vote_average.mean():.1f}")
+
+    st.markdown(f"### How **{pick}** compares to all films")
+    metrics = ["budget", "revenue", "popularity", "runtime", "vote_average"]
+    comp = pd.DataFrame({
+        pick: [gdf[m].median() for m in metrics],
+        "All films": [df[m].median() for m in metrics],
+    }, index=metrics)
+    # Normalise each row to the all-films median so bars are comparable.
+    norm = comp.div(comp["All films"], axis=0)
+    fig = go.Figure()
+    fig.add_bar(y=metrics, x=norm[pick], orientation="h", name=pick,
+                marker_color=GOLD)
+    fig.add_vline(x=1, line_dash="dash", line_color=MUTED)
+    fig.update_layout(**PLOTLY_LAYOUT, height=360,
+                      xaxis_title=f"{pick} median ÷ all-films median (1.0 = same)")
+    st.plotly_chart(fig, width="stretch")
+
+    st.markdown(f"### Budget vs revenue for {pick}")
+    fig = px.scatter(gdf, x="budget", y="revenue", color="success",
+                     color_discrete_map={0: RED, 1: GREEN}, size="popularity",
+                     hover_data=["vote_average"], size_max=18)
+    fig.update_layout(**PLOTLY_LAYOUT, height=380, showlegend=False)
+    st.plotly_chart(fig, width="stretch")
+
+
+# ======================================================================
+# PAGE: INSIGHTS  (Stage 2 EDA + Stage 3 stats)
+# ======================================================================
+elif page == "Insights":
+    st.markdown("### Correlation between numeric features")
+    corr = fdf[NUMERIC_COLS + ["success"]].corr()
+    fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r",
+                    zmin=-1, zmax=1, aspect="auto")
+    fig.update_layout(**PLOTLY_LAYOUT, height=430)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Values near +1 or −1 mean two features move together. Here they're "
+               "weak — no single feature strongly tracks success.")
+
+    st.markdown("### Does a feature really differ for hits vs flops?")
+    left, right = st.columns([1, 1.3])
+    with left:
+        feat = st.selectbox("Feature", ["popularity", "vote_average", "runtime", "budget"])
+        if fdf["success"].nunique() == 2:
+            a = fdf[fdf.success == 1][feat]
+            b = fdf[fdf.success == 0][feat]
+            t, p = stats.ttest_ind(a, b, equal_var=False)
+            st.metric("t-statistic", f"{t:.3f}")
+            st.metric("p-value", f"{p:.4f}")
+            if p < 0.05:
+                st.success(f"p < 0.05 → **{feat}** differs significantly between "
+                           "successful and failed films.")
+            else:
+                st.info(f"p ≥ 0.05 → no significant difference in **{feat}**.")
         else:
-            st.info(
-                f"p ≥ 0.05 → cannot reject H₀. No significant difference in "
-                f"*{num_feat}* between the groups."
-            )
+            st.warning("Need both hits and flops in view.")
+    with right:
+        fig = px.box(fdf, x="success", y=feat, color="success",
+                     color_discrete_map={0: RED, 1: GREEN})
+        fig.update_layout(**PLOTLY_LAYOUT, height=340, showlegend=False,
+                          xaxis=dict(tickmode="array", tickvals=[0, 1],
+                                     ticktext=["Flop", "Hit"]))
+        st.plotly_chart(fig, width="stretch")
 
-        # --- Chi-Square: is genre associated with success? ---
-        st.markdown("### Chi-Square Test (genre vs success)")
-        contingency = pd.crosstab(fdf["genre"], fdf["success"])
-        chi2, p_chi, dof, _ = stats.chi2_contingency(contingency)
-        st.write("**H₀ (null):** genre and success are independent (unrelated).")
-        cc1, cc2 = st.columns(2)
-        cc1.metric("chi² statistic", f"{chi2:.3f}")
-        cc2.metric("p-value", f"{p_chi:.4f}")
-        if p_chi < 0.05:
-            st.success("p < 0.05 → genre and success are associated.")
-        else:
-            st.info("p ≥ 0.05 → no evidence that genre and success are related.")
+    st.markdown("### Is genre associated with success? (Chi-square)")
+    if fdf["success"].nunique() == 2:
+        ct = pd.crosstab(fdf["genre"], fdf["success"])
+        chi2, pchi, dof, _ = stats.chi2_contingency(ct)
+        c1, c2 = st.columns(2)
+        c1.metric("chi² statistic", f"{chi2:.3f}")
+        c2.metric("p-value", f"{pchi:.4f}")
+        st.info("A **p-value** is the chance of seeing a difference this big if none "
+                "truly existed. Threshold used: 0.05. "
+                + ("Genre **is** associated with success here."
+                   if pchi < 0.05 else
+                   "No evidence genre is associated with success here."))
 
-# ----------------------------------------------------------------------
-# STAGE 4 - Model results
-# ----------------------------------------------------------------------
-with tab_model:
-    st.subheader("Random Forest — how well can we predict success?")
-    st.markdown(
-        "The model is trained on **budget, popularity, runtime, vote average "
-        "and genre**. We deliberately leave out *revenue* (it defines the "
-        "target, so using it would be cheating) and *title* (just a label)."
-    )
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Accuracy", f"{ev['accuracy']:.1%}")
-    m2.metric("Precision", f"{ev['precision']:.1%}")
-    m3.metric("Recall", f"{ev['recall']:.1%}")
-    m4.metric("Baseline*", f"{ev['baseline']:.1%}",
-              help="Accuracy if we blindly guessed 'success' every time.")
+# ======================================================================
+# PAGE: MODEL LAB  (Stage 4)
+# ======================================================================
+elif page == "Model Lab":
+    st.markdown("### Model comparison")
+    st.caption("All models trained on budget, popularity, runtime, vote average "
+               "and genre. Revenue and title are excluded on purpose.")
 
-    st.caption(
-        "*The dataset is imbalanced (most movies succeed), so compare accuracy "
-        "against this baseline — beating it is what actually shows skill."
-    )
+    scores = engines["scores"].copy()
+    styled = scores.style.format({c: "{:.1%}" for c in
+                                  ["Accuracy", "Precision", "Recall", "F1"]})
+    st.dataframe(styled, width="stretch", hide_index=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Confusion matrix**")
-        fig, ax = plt.subplots(figsize=(5, 4))
-        sns.heatmap(
-            ev["confusion"], annot=True, fmt="d", cmap="Blues", cbar=False,
-            xticklabels=["Pred fail", "Pred success"],
-            yticklabels=["Actual fail", "Actual success"], ax=ax,
-        )
-        st.pyplot(fig)
-        plt.close(fig)
-    with col2:
-        st.markdown("**Feature importance**")
-        top = ev["importance"].head(8)
-        fig, ax = plt.subplots(figsize=(5, 4))
-        sns.barplot(x=top.values, y=top.index, ax=ax, color="#4c72b0")
-        ax.set_xlabel("Importance")
-        st.pyplot(fig)
-        plt.close(fig)
+    b1, b2, b3 = st.columns(3)
+    with b1: kpi("Best model", engines["best_name"], gold=True)
+    with b2: kpi("Baseline (always 'hit')", f"{engines['baseline']:.1%}")
+    with b3: kpi("Revenue model R²", f"{engines['reg_r2']:.2f}")
 
-    st.info(
-        "Where it makes mistakes: because most movies succeed, the model leans "
-        "toward predicting 'success' and misses many of the rarer failures "
-        "(the bottom-left cell of the matrix)."
-    )
+    st.info("Honest read: every classifier lands close to the baseline — a film's "
+            "*success flag* is hard to predict from these features. But the revenue "
+            f"model explains about {engines['reg_r2']:.0%} of the variance in earnings, "
+            "so predicting *how much* a film makes works far better than the yes/no flag.")
 
-# ----------------------------------------------------------------------
-# STAGE 5.3 - Prediction section
-# ----------------------------------------------------------------------
-with tab_predict:
-    st.subheader("Will this film succeed?")
-    st.markdown("Enter a movie's details and get a prediction from the model.")
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown(f"#### Confusion matrix — {engines['best_name']}")
+        cm = engines["confusion"]
+        fig = px.imshow(cm, text_auto="d", color_continuous_scale="Blues",
+                        x=["Pred flop", "Pred hit"], y=["Actual flop", "Actual hit"])
+        fig.update_layout(**PLOTLY_LAYOUT, height=360, coloraxis_showscale=False)
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Most errors sit in the 'actual flop' row — because hits dominate, "
+                   "the model leans toward predicting success.")
+    with colB:
+        st.markdown("#### What drives the prediction")
+        imp = engines["importance"].head(8).sort_values()
+        fig = px.bar(imp, orientation="h", color=imp.values,
+                     color_continuous_scale=["#2a2f3a", GOLD])
+        fig.update_layout(**PLOTLY_LAYOUT, height=360, showlegend=False,
+                          coloraxis_showscale=False, xaxis_title="importance",
+                          yaxis_title="")
+        st.plotly_chart(fig, width="stretch")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        in_budget = st.number_input(
-            "Budget ($)", min_value=100_000, max_value=500_000_000,
-            value=50_000_000, step=1_000_000,
-        )
-        in_pop = st.slider("Popularity", 0.0, 100.0, 50.0)
-        in_runtime = st.slider("Runtime (minutes)", 60, 240, 120)
-    with col2:
-        in_vote = st.slider("Vote average", 0.0, 10.0, 6.0, 0.1)
-        in_genre = st.selectbox("Genre", all_genres)
 
-    if st.button("Predict", type="primary"):
-        movie = {
-            "budget": in_budget, "popularity": in_pop, "runtime": in_runtime,
-            "vote_average": in_vote, "genre": in_genre,
-        }
-        pred, proba = predict_success(model, feature_cols, movie)
-        if pred == 1:
-            st.success(f"✅ Predicted **SUCCESS** — {proba:.0%} confidence.")
-        else:
-            st.error(f"❌ Predicted **NOT a success** — {(1 - proba):.0%} confidence.")
-        st.progress(proba)
-        st.caption(
-            "Confidence is the model's estimated probability that revenue will "
-            "exceed budget. Treat it as a guide, not a guarantee."
-        )
+# ======================================================================
+# PAGE: PREDICTOR  (Stage 5.3) — the dual engine
+# ======================================================================
+elif page == "Predictor":
+    st.markdown("### 🔮 Score a film")
+    st.caption("Enter a concept and get a success probability, an expected-revenue "
+               "estimate, an ROI outlook, and a plain-language 'why'.")
 
-st.markdown("---")
-st.caption("MovieIQ · Built with Streamlit, scikit-learn, seaborn & scipy.")
+    with st.form("predict"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            in_budget = st.number_input("Budget ($)", 100_000, 500_000_000,
+                                        50_000_000, 1_000_000)
+            in_genre = st.selectbox("Genre", genres)
+        with c2:
+            in_pop = st.slider("Popularity", 0.0, 100.0, 50.0)
+            in_runtime = st.slider("Runtime (min)", 60, 240, 120)
+        with c3:
+            in_vote = st.slider("Vote average", 0.0, 10.0, 6.0, 0.1)
+        submitted = st.form_submit_button("Run MovieIQ", type="primary",
+                                          width="stretch")
+
+    if submitted:
+        movie = {"budget": in_budget, "popularity": in_pop, "runtime": in_runtime,
+                 "vote_average": in_vote, "genre": in_genre}
+        r = score_movie(engines, movie)
+
+        # ---- Row 1: gauge + headline numbers ----
+        g1, g2 = st.columns([1, 1])
+        with g1:
+            gauge = go.Figure(go.Indicator(
+                mode="gauge+number", value=r["prob"] * 100,
+                number={"suffix": "%", "font": {"color": "#fff"}},
+                title={"text": "Success probability", "font": {"color": MUTED}},
+                gauge={
+                    "axis": {"range": [0, 100], "tickcolor": MUTED},
+                    "bar": {"color": GOLD},
+                    "steps": [{"range": [0, 50], "color": "#2a1c1c"},
+                              {"range": [50, 100], "color": "#183025"}],
+                    "threshold": {"line": {"color": "#fff", "width": 3},
+                                  "value": 50}}))
+            gauge.update_layout(**PLOTLY_LAYOUT, height=300)
+            st.plotly_chart(gauge, width="stretch")
+        with g2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            k1, k2 = st.columns(2)
+            with k1: kpi("Estimated revenue", money(r["est_revenue"]), gold=True)
+            with k2: kpi("Estimated ROI", f"{r['est_roi']:.2f}×")
+            k3, k4 = st.columns(2)
+            with k3: kpi("Estimated profit", money(r["est_profit"]))
+            with k4: kpi("Budget", money(in_budget))
+
+        # ---- Verdict banner ----
+        hit = r["prob"] >= 0.5 and r["est_profit"] > 0
+        colr = GREEN if hit else RED
+        label = "LIKELY SUCCESS" if hit else "RISKY"
+        st.markdown(
+            f"<div class='verdict' style='background:rgba({'47,191,113' if hit else '228,87,46'},0.12);"
+            f"border-color:{colr}'><span class='pill' style='background:{colr};color:#08110c'>"
+            f"{label}</span>&nbsp;&nbsp;MovieIQ estimates this film earns "
+            f"<b>{money(r['est_revenue'])}</b> against a <b>{money(in_budget)}</b> budget "
+            f"— a projected <b>{money(r['est_profit'])}</b>.</div>",
+            unsafe_allow_html=True)
+
+        # ---- "Why": compare inputs to dataset medians ----
+        st.markdown("#### Why this result")
+        med = df[FEATURES].median()
+        why_rows = []
+        for f in FEATURES:
+            diff = (movie[f] - med[f]) / med[f] * 100
+            why_rows.append({"Feature": f, "Your film": movie[f],
+                             "Typical film": round(med[f], 1),
+                             "vs typical %": diff})
+        why = pd.DataFrame(why_rows)
+        fig = px.bar(why, x="vs typical %", y="Feature", orientation="h",
+                     color="vs typical %", color_continuous_scale=["#E4572E", "#2a2f3a", GREEN],
+                     color_continuous_midpoint=0)
+        fig.update_layout(**PLOTLY_LAYOUT, height=300, coloraxis_showscale=False,
+                          xaxis_title="how your film compares to a typical film (%)",
+                          yaxis_title="")
+        st.plotly_chart(fig, width="stretch")
+        st.caption(f"Genre: **{in_genre}**. Bars to the right mean your film is above "
+                   "the typical film on that feature. Note the success flag is only "
+                   "weakly predictable — treat the probability as a guide, and lean on "
+                   "the revenue/ROI estimate for the money question.")
+
+        # ---- Downloadable report ----
+        report = (f"MovieIQ prediction report\n{'='*30}\n"
+                  f"Genre: {in_genre}\nBudget: {money(in_budget)}\n"
+                  f"Popularity: {in_pop}  Runtime: {in_runtime}m  Vote: {in_vote}\n\n"
+                  f"Success probability: {r['prob']:.0%}\n"
+                  f"Estimated revenue: {money(r['est_revenue'])}\n"
+                  f"Estimated profit: {money(r['est_profit'])}\n"
+                  f"Estimated ROI: {r['est_roi']:.2f}x\n"
+                  f"Verdict: {label}\n")
+        st.download_button("⬇ Download prediction report", report,
+                           "movieiq_report.txt", "text/plain")
+
+st.markdown(f"<p style='text-align:center;color:{MUTED};margin-top:26px'>"
+            "MovieIQ · built with Streamlit, scikit-learn, Plotly & SciPy</p>",
+            unsafe_allow_html=True)
